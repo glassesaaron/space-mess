@@ -1,0 +1,1567 @@
+<html>
+<head>
+	<title>space mess</title>
+	<style type="text/css">
+	body {
+		background-color: #000000;
+		padding: 0px;
+		margin: 0px;
+	}
+	</style>
+</head>
+<body>	
+	<script type="text/javascript">
+	
+	// background song "underclocked" provided by eric skiff, http://ericskiff.com/music/
+	//
+	// todo:
+	// make bombs blow up stuff in an area
+		// make the visual explosion approximate the damage size
+	// bug: if you're already boosting and it changes direction, you continue boosting in the same direction
+	// make it so that if an asteroid hits an enemy ship, the enemy ship dies
+	// make freighters that fly across the map
+		// big prizes
+		// have no protection, but if you start to shoot them they speed up
+	// save audio preferences (music playing)
+	// new icon for gifts
+	// sounds for boost, bullets shooting, missles shooting, so mo
+	// let users pick their own upgrades
+		// press a button to open up the shop window and spend yoru money
+		// teired items: moving up costs more and more
+	// different types of missles
+	// ship upgrades
+		// shields
+		// turrents
+		// drones that follow you around?
+			// automatically shoot at asteroids and enemies for you
+	// create icons instead of text for top left
+	// better animations for planets shrinking, planets blowing up, bomb blowing up
+	// increase number of asteroids based on score?
+	// show the rank on the ship
+	// add enemies that randomly patrol the map
+		// they go to the nearest asteroid, shoot it, pick up upgrades, repeat
+		// if you come within range, they attack based on agression
+	// make enemies get harder the higher in rank you go up
+		// increase agression based on your points
+		// more speed, armor, guns, etc.
+	// make the screen loop
+		// if an asteroid you haven't shot has looped, replace it with an asteroid of the current level
+	// fix algo when enemies hit edge of screen
+		// currently jankly, should bounce like a breakout ball
+	// remove zoom refresh interval
+		// zooms in and out when object moves right, out of screen
+	// fix takehit algo
+	// drop random powerups on the map
+	// gps navigation to the closest asteroid
+	// button to bring up a big version of the map
+	// smarter rendering
+		// black out individual items instead of entire screen (is this effective?)
+		// only redraw the things you need to
+	// fix asteroid class to use objects instead of arrays
+	// rendering choppy
+	// move all classes to different .js files
+	// check for global variable leaks
+		// https://raw.githubusercontent.com/kangax/detect-global/master/detect-global.src.js
+	
+	var spaceMess = function(){
+		
+		var developmentMode = !(window.location.href.indexOf('github.io') > -1);
+		
+		var theSpaceMess = {};
+		theSpaceMess.version = '1.0';
+		theSpaceMess.debug = developmentMode;
+		theSpaceMess.score = 0;
+		var mainShip, mainStars, mainAsteroids, mainEnemies, canvasCenter, runTimeout, renderTimeout, gameOver;
+		var giftScreenSize = 30;
+		
+		var fps = {
+			clock : 60,
+			max: 240,
+			measured: 240,
+			filter : 60,
+		}
+		fps.current = (new Date);
+		fps.last = (new Date) * 1;
+		
+		var announcements = (function(){
+			
+			var items = [];
+			
+			function getAnnouncement(){
+				if(items.length > 0){
+					if(!items[0].started){
+						items[0].started = true;
+						reduceAnnouncement();
+					}
+					return items[0];
+				} else {
+					return false;
+				}
+			}
+			
+			function reduceAnnouncement(){
+				items[0].current--;
+				if(items[0].current <= 0){
+					if(items.length > 1){
+						items = items.slice(1, items.length);
+					} else {
+						items = [];
+					}
+				} else {
+					setTimeout(reduceAnnouncement, 1000 / 60);
+				}
+			}
+			
+			function makeAnnouncement(newText){
+				items.push({
+					text : newText,
+					current : 90,
+					duration : 90,
+					started : false
+				})
+			}
+			
+			return {
+				getAnnouncement : getAnnouncement,
+				makeAnnouncement : makeAnnouncement
+			}
+		})()
+		
+		var sounds = (function(){
+			var maxSounds = 5;
+			
+			var soundDict = {};
+			soundDict.bullet = [];
+			soundDict.bomb = [];
+			soundDict.explosion = [];
+			soundDict.gift = [];
+			
+			var backgroundMusic = new Audio('sounds/underclocked.mp3');
+			backgroundMusic.volume = 0.5;
+			backgroundMusic.addEventListener('ended', function(){ this.play(); })
+			if(!developmentMode){
+				backgroundMusic.play();
+			}
+			
+			for(var i = 0; i < maxSounds; i++){
+				soundDict.bullet.push(new Audio('sounds/bullet.wav'));
+				soundDict.bomb.push(new Audio('sounds/bomb.wav'));
+				soundDict.explosion.push(new Audio('sounds/explosion.wav'));
+				soundDict.gift.push(new Audio('sounds/gift.wav'));
+			}
+			
+			function playSound(name){
+				if(name in soundDict){
+					var soundArray = soundDict[name];
+					for(var i = 0; i < soundArray.length; i++){
+						if(soundArray[i].paused){
+							soundArray[i].play();
+							break;
+						}
+					}
+				}
+			}
+			
+			function toggleBackground(){
+				if(backgroundMusic.paused){
+					backgroundMusic.play();
+				} else {
+					backgroundMusic.pause();
+				}
+			}
+			
+			return {
+				playSound : playSound,
+				toggleBackground : toggleBackground
+			}
+		})();
+		
+		var zoom = (function(){
+			var level = 0.3;
+			var base = 10;
+			var current = 3;
+			var desired = 3;
+			var zoomInSpeed = 30;
+			var zoomOutSpeed = 4;
+			var zoomOutSpeedMax = 4;
+			var zoomTimeout = null;
+			var increment = 0.5;
+			var minZoom = 3.5;
+			var maxZoom = 5;
+			
+			function autoZoom(itemsOnScreen){
+				if(desired == current){
+					if(itemsOnScreen.length == 0 && desired >= minZoom){
+						zoomOutSpeed = zoomOutSpeedMax
+						desired -= increment;
+						renderZoom();
+					} else if (itemsOnScreen.length > 0){
+						var nextLevel = (desired + increment) / base;
+						var allOnScreen = true;
+						for(var i = 0; i < itemsOnScreen.length; i++){
+							allOnScreen = allOnScreen && onScreenFull(itemsOnScreen[i][0], itemsOnScreen[i][1], itemsOnScreen[i][2], itemsOnScreen[i][3], nextLevel);
+						}
+						if(allOnScreen && desired <= maxZoom){
+							desired += increment;
+							renderZoom();
+						} else if (!allOnScreen && desired >= minZoom){
+							zoomOutSpeed = zoomInSpeed
+							desired -= increment;
+							renderZoom();
+						}
+					}
+				}
+			}
+			
+			function renderZoom(){
+				if(zoomTimeout){
+					clearTimeout(zoomTimeout);
+					zoomTimeout == null;
+				}
+				if(desired > current){
+					current += 0.01;
+					current = Math.round(current * 100) / 100
+					zoomTimeout = setTimeout(renderZoom, zoomInSpeed);
+				} else if (desired < current){
+					current -= 0.01;
+					current = Math.round(current * 100) / 100
+					zoomTimeout = setTimeout(renderZoom, zoomOutSpeed);
+				}
+				level = current / base;
+			}
+			
+			function getLevel(){
+				return level;
+			}
+			
+			return {
+				getLevel : getLevel,
+				autoZoom : autoZoom
+			}
+			
+		})();
+		
+		var canvas = document.createElement("canvas");
+		var mainContext = canvas.getContext('2d');
+		var gameWidth = 0;
+		var gameHeight = 0;
+		var miniMap = {
+			width : 0,
+			height: 0,
+			x : 0,
+			y : 0,
+			binWidth: 1,
+			binHeight: 1
+		}
+		var keys = { }
+		
+		var map = {
+			left : -50000,
+			width : 100000,
+			top : -50000,
+			height : 100000
+		}
+		
+		var explosions = (function(){
+			
+			var explosionList = [];
+			
+			var explosion = function(x, y, size){
+				var particles = [];
+				var particleSize = size;
+				var particleAmount = Math.floor(Math.random() * 40) + 30;
+				
+				for(var i = 0; i < particleAmount; i++){
+					var angle = Math.floor(Math.random() * 359) * Math.PI / 180;
+					var speed = Math.random() + Math.log(size);
+					var xSpeed = Math.sin(angle) * speed;
+					var ySpeed = 0 - (Math.cos(angle) * speed);
+					particleSize = size + (Math.round((Math.floor(Math.random() * 10) / 10 - 0.5) * 10) / 10);
+					particles.push({ 
+						x : x,
+						y : y,
+						xSpeed : xSpeed,
+						ySpeed : ySpeed,
+						size : particleSize,
+						framesLeft : 5
+					});
+				}
+				
+				function stillGoing(){
+					return particles.length > 0;
+				}
+				
+				function update(){
+					var framesToRemove = [];
+					for(var i = 0; i < particles.length; i++){
+						particles[i].x += particles[i].xSpeed;
+						particles[i].y += particles[i].ySpeed;
+						particles[i].framesLeft--;
+						if(particles[i].framesLeft == 0){
+							if(particles[i].size > 1){
+								particles[i].size -= 0.3;
+							} else {
+								particles[i].size -= 0.1;
+							}
+							particles[i].framesLeft = 5;
+						}
+						if(particles[i].size <= 0.5){
+							framesToRemove.push(i);
+						}
+					}
+					for(var i = 0; i < framesToRemove.length; i++){
+						particles.splice(framesToRemove[i], 1);
+					}
+				}
+			
+				function render(context){
+					context.save();
+					var x = canvasCenter.x - (mainShip.position.x * zoom.getLevel());
+					var y = canvasCenter.y - (mainShip.position.y * zoom.getLevel());
+					context.translate(x, y);
+					context.fillStyle = "#FFFFFF";
+					for(var i = 0; i < particles.length; i++){
+						context.beginPath();
+						context.arc(particles[i].x * zoom.getLevel(),particles[i].y * zoom.getLevel(), particles[i].size * zoom.getLevel(),0,2*Math.PI);
+						context.closePath();
+						context.fill();
+					}
+					context.restore();
+				}
+				
+				return {
+					stillGoing : stillGoing,
+					update : update,
+					render : render
+				}
+			}
+			
+			function createExplosion(x, y, size, playSound){
+				if(playSound){
+					sounds.playSound('explosion');
+				}
+				explosionList.push(new explosion(x, y, size));
+			}
+			
+			function update(){
+				var explosionsToRemove = [];
+				for(var i = 0; i < explosionList.length; i++){
+					explosionList[i].update();
+					if(!explosionList[i].stillGoing()){
+						explosionsToRemove.push(i);
+					}
+				}
+				for(var i = 0; i < explosionsToRemove.length; i++){
+					explosionList.splice(explosionsToRemove[i], 1);
+				}
+			}
+			
+			function render(context){
+				var itemsOnScreen = [];
+				for(var i = 0; i < explosionList.length; i++){
+					itemsOnScreen = itemsOnScreen.concat(explosionList[i].render(context));
+				}
+				return itemsOnScreen;
+			}
+			
+			return {
+				createExplosion : createExplosion,
+				update : update,
+				render: render
+			}
+			
+		})()
+		
+		function stars(){
+			var stars = [];
+			var maxStarSize = 3;
+			
+			for(var i = 0; i < gameWidth * 10; i++){
+				stars.push([(Math.floor(Math.random() * map.width) + map.left), 
+							(Math.floor(Math.random() * map.height) + map.top), 
+							(Math.floor(Math.random() * maxStarSize) + 1)]);
+			}
+			
+			function render(context){
+				context.save();
+				var x = canvasCenter.x - (mainShip.position.x * zoom.getLevel());
+				var y = canvasCenter.y - (mainShip.position.y * zoom.getLevel());
+				context.translate(x, y);
+				context.fillStyle = "#FFFFFF";
+				for(var i = 0; i < stars.length; i++){
+					if(onScreenPartial(stars[i][0], stars[i][1], stars[i][2], stars[i][2]))
+					{
+						context.beginPath();
+						context.arc(stars[i][0] * zoom.getLevel(),stars[i][1] * zoom.getLevel(),stars[i][2] * zoom.getLevel(),0,2*Math.PI);
+						context.closePath();
+						context.fill();
+					}
+				}
+				context.restore();
+			}
+			
+			return { 
+				render : render
+			 }
+		}
+		
+		function asteroids(){
+			var asteroids = [[400, 400, 500, 1, -0.5, 100, { health : 0, gunRank : 1, bombs : 0, boost : 100, boostMultiplier : 0 }]];
+			var minAsteroidSize = giftScreenSize;
+			var maxAsteroidSize = 1200;
+			
+			for(var i = 0; i < (gameWidth / 50); i++){
+				asteroids.push(generateAsteroid());
+			}
+			
+			function generateAsteroid(){
+				var speedMax = 4 + Math.floor(theSpaceMess.score / 500);
+				var size = (Math.floor(Math.random() * maxAsteroidSize) + (minAsteroidSize) + 1);
+				var xSpeed = (Math.floor(Math.random() * (speedMax * 2)) + -speedMax);
+				var ySpeed = (Math.floor(Math.random() * (speedMax * 2)) + -speedMax);
+				var speedMultiplier = Math.floor(Math.max(xSpeed, ySpeed) / 5);
+				if(speedMultiplier < 1){ speedMultiplier = 1; }
+				var giftSize = Math.floor(size / 300) * speedMultiplier;
+				if(giftSize < 1){ giftSize = 1; }
+				var gift = { health : 0, gunRank : 0, bombs : 0, boost : 0, boostMultiplier : 0 }
+				for(var i = 0; i < giftSize; i++){
+					var choice = Math.floor(Math.random() * 100);
+					if(choice >= 0 && choice <= 24){
+						gift.boost += 50;
+					} else if(choice >= 25 && choice <= 59){
+						gift.boostMultiplier += 1;
+					} else if(choice >= 60 && choice <= 74){
+				        gift.health += 50;
+					} else if(choice >= 75 && choice <= 89){
+						gift.bombs += 1;
+					} else {
+						gift.gunRank += 1;
+					}
+				}
+				return [(Math.floor(Math.random() * map.width) + map.left), 
+						(Math.floor(Math.random() * map.height) + map.top), 
+						size,
+						xSpeed,
+						ySpeed,
+						size / 5,
+						gift];
+			}
+			
+			function isDangerous(index){
+				return asteroids[index][2] != minAsteroidSize;
+			}
+			
+			function getPrize(index){
+				var prize = asteroids[index][6];
+				var indexes = [index];
+				replaceAsteroids(indexes);
+				return prize;
+			}
+			
+			function getForce(index){
+				return { x : asteroids[index][3], y : asteroids[index][4] }
+			}
+			
+			function checkCollisions(x, y, width, height){
+				var results = [];
+				for(var i = 0; i < asteroids.length; i++){
+					if(onScreenPartial(asteroids[i][0], asteroids[i][1], asteroids[i][2], asteroids[i][2]))
+					{
+						if(collided(x, y, width, height, asteroids[i][0],asteroids[i][1],asteroids[i][2],asteroids[i][2], true)){
+							results.push(i);
+						}
+					}
+				}
+				return results;
+			}
+			
+			function takeDamage(index, damage){
+				if(isDangerous(index)){
+					asteroids[index][2] -= damage;
+					if(asteroids[index][2] <= minAsteroidSize){
+						asteroids[index][2] = minAsteroidSize;
+						asteroids[index][3] = 0;
+						asteroids[index][4] = 0;
+						theSpaceMess.score += Math.round(asteroids[index][5]);
+						explosions.createExplosion(asteroids[index][0], asteroids[index][1], 7, true);
+					}
+				}
+			}
+			
+			function replaceAsteroids(indexesToReplace){
+				for(var i = 0; i < indexesToReplace.length; i++){
+					asteroids.splice(indexesToReplace[i], 1);
+				}
+				for(var i = 0; i < indexesToReplace.length; i++){
+					asteroids.push(generateAsteroid());
+				}
+			}
+			
+			function update(){
+				var toReplace = [];
+				for(var i = 0; i < asteroids.length; i++){
+					asteroids[i][0] += asteroids[i][3];
+					asteroids[i][1] += asteroids[i][4];
+					if(asteroids[i][0] - (asteroids[i][2] / 2) > map.left + map.width ||
+					   asteroids[i][0] + (asteroids[i][2] / 2) < map.left || 
+					   asteroids[i][1] - (asteroids[i][2] / 2) > map.top + map.height ||
+					   asteroids[i][1] + (asteroids[i][2] / 2) < map.top){
+						toReplace.push(i);
+					}
+				}
+				replaceAsteroids(toReplace);
+			}
+			
+			function renderMap(context){
+				context.beginPath()
+				context.strokeStyle = "#7FFF00";
+				for(var i = 0; i < asteroids.length; i++){
+					context.rect(Math.floor(((asteroids[i][0] + (map.width / 2)) / miniMap.binWidth) + miniMap.x),
+								 Math.floor(((asteroids[i][1] + (map.height / 2)) / miniMap.binHeight) + miniMap.y),2,2);
+				}
+				context.stroke();
+				context.closePath();
+			}
+			
+			function render(context){
+				context.save();
+				var x = canvasCenter.x - (mainShip.position.x * zoom.getLevel());
+				var y = canvasCenter.y - (mainShip.position.y * zoom.getLevel());
+				context.translate(x, y);
+				context.fillStyle = "#FF0000";
+				var itemsOnScreen = [];
+				for(var i = 0; i < asteroids.length; i++){
+					if(onScreenPartial(asteroids[i][0], asteroids[i][1], asteroids[i][2], asteroids[i][2]))
+					{
+						itemsOnScreen.push([asteroids[i][0], asteroids[i][1], asteroids[i][2], asteroids[i][2]]);
+						if(isDangerous(i)){
+							context.beginPath();
+							context.arc(asteroids[i][0] * zoom.getLevel(),asteroids[i][1] * zoom.getLevel(),(asteroids[i][2] / 2) * zoom.getLevel(),0,2*Math.PI);
+							context.closePath();
+							context.fill();
+						} else {
+							context.fillStyle = "#0000FF";
+							context.beginPath();
+							context.arc(asteroids[i][0] * zoom.getLevel(),asteroids[i][1] * zoom.getLevel(),(asteroids[i][2] / 2) * zoom.getLevel(),0,2*Math.PI);
+							context.closePath();
+							context.fill();
+							context.fillStyle = "#FF0000";
+						}
+					}
+				}
+				context.restore();
+				return itemsOnScreen;
+			}
+			
+			return { 
+				isDangerous : isDangerous,
+				getPrize : getPrize,
+				getForce : getForce,
+				checkCollisions : checkCollisions,
+				takeDamage : takeDamage,
+				update : update,
+				renderMap : renderMap, 
+				render : render 
+			}
+		}
+		
+		function enemies(){
+			
+			var enemyList = [];
+			
+			function enemy(){
+
+				var x = (Math.floor(Math.random() * map.width) + map.left);
+				var y = (Math.floor(Math.random() * map.height) + map.top);
+				var width = 20;
+				var height = 25;
+				var angle = 0;
+				var force = {
+					x : 0,
+					y : 0
+				}
+				var velocity = 0.22 + Math.floor((Math.random() / 3) * 10) / 100;
+				var bullet = {
+					current : 0,
+					max : 30,
+					velocity : 25,
+					maxDistance : 3000,
+					size : 2,
+					damage : 20
+				}
+				var bullets = [];
+				var life = 30 + Math.floor(Math.random() * 50);
+				var gift = { health : 0, gunRank : 0, bombs : 0, boost : 0, boostMultiplier : 0 }
+				var choice = Math.floor(Math.random() * 100);
+				for(var i = 0; i < Math.floor(life / 30); i++){
+					if(choice >= 0 && choice <= 24){
+						gift.boost += 50;
+					} else if(choice >= 25 && choice <= 59){
+						gift.boostMultiplier += 1;
+					} else if(choice >= 60 && choice <= 74){
+						gift.health += 50;
+					} else if(choice >= 75 && choice <= 89){
+						gift.bombs += 1;
+					} else {
+						gift.gunRank += 1;
+					}
+				}
+				
+				function shoot(){
+					if(bullet.current == 0){
+						var newBullet = {
+							x : x,
+							y : y,
+							xStart : x,
+							yStart : y,
+							xForce : (Math.sin(angle) * bullet.velocity) + force.x,
+							yForce : 0 - (Math.cos(angle) * bullet.velocity) + force.y,
+							width : bullet.size,
+							height : bullet.size,
+							damage : bullet.damage,
+							maxDistance: bullet.maxDistance,
+							type : 'bullet'
+						}
+						bullets.push(newBullet);
+						bullet.current = bullet.max;
+					}
+				}
+				
+				function getBulletPositions(){
+					var results = [];
+					for(var i = 0; i < bullets.length; i++){
+						results.push([bullets[i].x, bullets[i].y, bullets[i].width, bullets[i].height, bullets[i].damage, bullets[i].type]);
+					}
+					return results;
+				}
+				
+				function removeBullet(index){
+					bullets.splice(index, 1);
+				}
+				
+				function takeDamage(damage){
+					if(life > 0){
+						life -= damage;
+						if(life <= 0){
+							life = 0;
+							theSpaceMess.score += 100;
+							explosions.createExplosion(x, y, 4, true);
+						}
+					}
+				}
+				
+				function getPosition(){
+					return {
+						x : x,
+						y : y,
+						width : width,
+						height : height,
+						angle : angle,
+						life : life
+					}
+				}
+				
+				function update(){
+					
+					if(bullet.current > 0){
+						bullet.current--;
+					}
+					var bulletsToRemove = [];
+					for(var i = 0; i < bullets.length; i++){
+						bullets[i].x += bullets[i].xForce;
+						bullets[i].y += bullets[i].yForce;
+						if(Math.sqrt(Math.pow((bullets[i].x - bullets[i].xStart), 2) + Math.pow((bullets[i].y - bullets[i].yStart), 2)) > bullets[i].maxDistance){
+							bulletsToRemove.push(i);
+						};
+					}
+					for(var i = 0; i < bulletsToRemove.length; i++){
+						removeBullet(bulletsToRemove[i]);
+					}
+					
+					if(life > 0){				
+						var distance = Math.sqrt(Math.pow(mainShip.position.x - x, 2) + Math.pow(mainShip.position.y - y, 2));
+						if(distance > 5000){
+							if(angle == 0){
+								angle = Math.floor(Math.random() * 359) * Math.PI / 180;
+							}
+							force.x += Math.sin(angle) * (velocity * 2);
+							force.y -= Math.cos(angle) * (velocity * 2);
+							if(x + force.x <= map.left || x + force.x >= map.left + map.width){
+								force.x = 0;
+								angle = 0;
+							}
+							if(y + force.y <= map.top || y + force.y >= map.top + map.height){
+								force.y = 0
+								angle = 0;
+							}
+						}else{
+							var dy = mainShip.position.y - y;
+							var dx = mainShip.position.x - x;
+							angle = Math.atan2(dy, dx) + (90 * (Math.PI/180));
+							if(distance > 500){
+								force.x += Math.sin(angle) * velocity;
+								force.y -= Math.cos(angle) * velocity;
+							} else {
+								shoot();
+								if(Math.sqrt(Math.pow(force.x, 2) + Math.pow(force.y, 2)) > 1){
+									var brakeVector = (distance - 400) / 10000;
+									brakeVector = brakeVector < 1 ? 1 : 1 + brakeVector; 
+									force.x -= Math.sin(angle) * (velocity * brakeVector);
+									force.y += Math.cos(angle) * (velocity * brakeVector);
+								}
+							}
+						}
+						x += force.x;
+						y += force.y;
+						force.x = force.x * 0.98;
+						force.y = force.y * 0.98;
+						if(Math.abs(force.x) < 0.005){ force.x = 0; }
+						if(Math.abs(force.y) < 0.005){ force.y = 0; }
+					}
+				}
+				
+				function render(context){
+					
+					var dx = canvasCenter.x - (mainShip.position.x * zoom.getLevel()) + x * zoom.getLevel();
+					var dy = canvasCenter.y - (mainShip.position.y * zoom.getLevel()) + y * zoom.getLevel();
+					
+					context.save();
+					context.translate(dx, dy);
+					context.rotate(angle);
+					if(life > 0){
+						context.beginPath();
+						context.moveTo(0, -(height / 2) * zoom.getLevel());
+						context.lineTo((width / 2) * zoom.getLevel(), (height / 2) * zoom.getLevel());
+						context.lineTo(-(width / 2) * zoom.getLevel(), (height / 2) * zoom.getLevel());
+						context.fill();
+					} else {
+						context.fillStyle = "#0000FF";
+						context.beginPath();
+						context.arc(0,0, (giftScreenSize / 2) * zoom.getLevel(),0,2*Math.PI);
+						context.closePath();
+						context.fill();
+					}
+					context.restore();
+					
+					dx = canvasCenter.x - (mainShip.position.x * zoom.getLevel());
+					dy = canvasCenter.y - (mainShip.position.y * zoom.getLevel());
+					context.save();
+					context.translate(dx, dy);
+					for(var i = 0; i < bullets.length; i++){
+						if(bullets[i].type == 'bullet'){
+							context.fillStyle = "#FFFFFF";
+						} else {
+							context.fillStyle = "#708090";
+						}
+						context.beginPath();
+						context.arc(bullets[i].x * zoom.getLevel(),bullets[i].y * zoom.getLevel(),bullets[i].width * zoom.getLevel(),0,2*Math.PI);
+						context.closePath();
+						context.fill();
+					}
+					context.restore();
+					
+					context.closePath();
+				}
+				
+				return {
+					gift : gift,
+					getPosition : getPosition,
+					getBulletPositions : getBulletPositions,
+					removeBullet : removeBullet,
+					takeDamage : takeDamage,
+					update : update,
+					render : render
+				}
+			}
+			
+			function getBulletPositions(){
+				var result = [];
+				for(var i = 0; i < enemyList.length; i++){
+					var tmp = enemyList[i].getBulletPositions();
+					for(var j = 0; j < tmp.length; j++){
+						tmp[j].push(i);
+						tmp[j].push(j);
+					}
+					result = result.concat(tmp);
+				}
+				return result;
+			}
+			
+			function removeBullet(enemyIndex, bulletIndex){
+				enemyList[enemyIndex].removeBullet(bulletIndex);
+			}
+			
+			function checkCollisions(x, y, width, height){
+				var results = [];
+				for(var i = 0; i < enemyList.length; i++){
+					var enemyPosition = enemyList[i].getPosition();
+					if(onScreenPartial(enemyPosition.x, enemyPosition.y, enemyPosition.width, enemyPosition.height))
+					{
+						if(collided(x, y, width, height, enemyPosition.x, enemyPosition.y, enemyPosition.width, enemyPosition.height, false)){
+							results.push(i);
+						}
+					}
+				}
+				return results;
+			}
+			
+			function isDangerous(index){
+				return enemyList[index].getPosition().life > 0;
+			}
+			
+			function takeDamage(index, damage){
+				enemyList[index].takeDamage(damage);
+			}
+			
+			function getPrize(index){
+				var prize = enemyList[index].gift;
+				enemyList.splice(index, 1);
+				return prize;
+			}
+			
+			function update(){
+				var aliveEnemies = enemyList.filter(function(x){ return x.getPosition().life > 0; }).length;
+				if(aliveEnemies < (Math.floor(theSpaceMess.score / 100) + 20)){
+					enemyList.push(new enemy());
+				}
+				for(var i = 0; i < enemyList.length; i++){
+					enemyList[i].update();
+				}
+			}
+			
+			function renderMap(context){
+				context.beginPath()
+				context.strokeStyle = "#FF0000";
+				for(var i = 0; i < enemyList.length; i++){
+					var enemyPosition = enemyList[i].getPosition();
+					context.rect(Math.floor(((enemyPosition.x + (map.width / 2)) / miniMap.binWidth) + miniMap.x),
+								 Math.floor(((enemyPosition.y + (map.height / 2)) / miniMap.binHeight) + miniMap.y),2,2);
+				}
+				context.stroke();
+				context.closePath();
+			}
+			
+			function render(context){
+				context.save();
+				context.fillStyle = "#FF0000";
+				var itemsOnScreen = [];
+				for(var i = 0; i < enemyList.length; i++){
+					var enemyPosition = enemyList[i].getPosition();
+					if(onScreenPartial(enemyPosition.x, enemyPosition.y, enemyPosition.width, enemyPosition.height))
+					{
+						enemyList[i].render(context);
+						itemsOnScreen.push([enemyPosition.x, enemyPosition.y, enemyPosition.width, enemyPosition.height]);
+					}
+				}
+				context.restore();
+				return itemsOnScreen;
+			}
+			
+			return {
+				getBulletPositions : getBulletPositions,
+				removeBullet : removeBullet,
+				checkCollisions : checkCollisions,
+				isDangerous : isDangerous,
+				takeDamage : takeDamage,
+				getPrize : getPrize,
+				update : update,
+				renderMap : renderMap,
+				render : render
+			}
+			
+		}
+		
+		function ship(){
+			var width = 20;
+			var height = 25;
+			var position = {
+				x : 0,
+				y : 0
+			}
+			var angle = 0;
+			var rotate = {
+				speed : 1.75,
+				amount : 0
+			};
+			var acceleration = 0.3;
+			var velocity = 0;
+			var maxForce = 6;
+			var force = {
+				x : 0,
+				y : 0
+			}
+			var bullet = {
+				current : 0,
+				max : 10,
+				velocity : 25,
+				maxDistance : 3000,
+				size : 2,
+				damage : 10
+			}
+			var bomb = {
+				current : 0,
+				max : 30,
+				velocity : 15,
+				maxDistance : 3000,
+				size : 10,
+				damage : 500
+			}
+			var bullets = [];
+			var health = 100;
+			var bombs = 1;
+			var boostMultiplier = 0;
+			var boost = 100;
+			var slomo = 100;
+			var doingSlowMotion = false;
+				
+			function turnLeft(){
+				rotate.amount--;
+				changeAngle();
+			}
+			
+			function turnRight(){
+				rotate.amount++;
+				changeAngle();
+			}
+			
+			function strafeLeft(){
+				var newAngle = angle - 1.5708;
+				force.x += Math.sin(newAngle) * acceleration;
+				force.y -= Math.cos(newAngle) * acceleration;
+			}
+			
+			function strafeRight(){
+				var newAngle = angle + 1.5708;
+				force.x += Math.sin(newAngle) * acceleration;
+				force.y -= Math.cos(newAngle) * acceleration;
+			}
+			
+			function boostShip(){
+				if(boost > 0){
+					boost -= 0.5;
+					if(boost < 0){ boost = 0; }
+					if((Math.abs(force.x) + Math.abs(force.y)) < (75 + (100 * boostMultiplier))){
+						force.x *= (1.025 + (boostMultiplier / 10000));
+						force.y *= (1.025 + (boostMultiplier / 10000));
+					}
+				}
+			}
+			
+			function toggleSlowMotion(){
+				doingSlowMotion = !doingSlowMotion;
+			}
+			
+			function changeAngle(){
+				var newAngle = (Math.PI / 3) / 30 * rotate.speed * rotate.amount;
+				// keep this number from getting out of control
+				if(Math.abs(newAngle) > 6.28319 || Math.abs(newAngle) < -6.28319){ 
+					rotate.amount = 0;
+					angle = 0;
+				} else {
+					angle = newAngle;
+				}
+			}
+			
+			function accelerate(){
+				velocity = acceleration;
+			}
+			
+			function decelerate(){
+				velocity = -acceleration;
+			}
+			
+			function shoot(){
+				if(bullet.current == 0){
+					var newBullet = {
+						x : position.x,
+						y : position.y,
+						xStart : position.x,
+						yStart : position.y,
+						xForce : (Math.sin(angle) * bullet.velocity) + force.x,
+						yForce : 0 - (Math.cos(angle) * bullet.velocity) + force.y,
+						width : bullet.size,
+						height : bullet.size,
+						damage : bullet.damage,
+						maxDistance: bullet.maxDistance,
+						type : 'bullet'
+					}
+					bullets.push(newBullet);
+					bullet.current = bullet.max;
+				}
+			}
+			
+			function shootBomb(){
+				if(bomb.current == 0 && bombs > 0){
+					var newBomb = {
+						x : position.x,
+						y : position.y,
+						xStart : position.x,
+						yStart : position.y,
+						xForce : (Math.sin(angle) * bomb.velocity) + force.x,
+						yForce : 0 - (Math.cos(angle) * bomb.velocity) + force.y,
+						width : bomb.size,
+						height : bomb.size,
+						damage : bomb.damage,
+						maxDistance: bomb.maxDistance,
+						type : 'bomb'
+					}
+					bullets.push(newBomb);
+					bomb.current = bomb.max;
+					bombs--;
+				}
+			}
+			
+			function getBulletPositions(){
+				var results = [];
+				for(var i = 0; i < bullets.length; i++){
+					results.push([bullets[i].x, bullets[i].y, bullets[i].width, bullets[i].height, bullets[i].damage, bullets[i].type]);
+				}
+				return results;
+			}
+			
+			function removeBullet(index){
+				bullets.splice(index, 1);
+			}
+			
+			function getStats(){
+				var result = {};
+				result.health = health;
+				result.gunRank = 11 - bullet.max;
+				result.bombs = bombs;
+				result.boost = Math.ceil(boost);
+				result.boostMultiplier = boostMultiplier;
+				result.slomo = Math.ceil(slomo);
+				return result;
+			}
+			
+			function upgrade(newHealth, gunRank, newBombs, newBoost, newBoostMultiplier){
+				health += newHealth;
+				bullet.max -= gunRank;
+				if(bullet.max < 1){ bullet.max = 1}
+				bombs += newBombs;
+				boost += newBoost;
+				boostMultiplier += newBoostMultiplier;
+				if(boostMultiplier > 10){ boostMultiplier = 10 }
+			}
+			
+			function takeHit(xForce, yForce, damage){
+				health -= damage;
+				if(xForce != 0 && yForce != 0){
+					if(Math.abs(force.x) + Math.abs(force.y) < 4){
+						force.x = xForce * 10;
+						force.y = yForce * 10;
+					} else {
+						force.x = 0 - force.x;
+						force.y = 0 - force.y;
+					}
+				}
+			}
+			
+			function update(){
+				if(doingSlowMotion && slomo > 0.5){
+					fps.clock = 30;
+					slomo -= 0.5;
+				} else if (slomo < 99.97){
+					fps.clock = 60;
+					slomo += 0.03;
+					doingSlowMotion = false;
+				}
+				
+				boost = Math.round(boost * 100) / 100;
+				if(boost < 100 && !keys.boost){
+					boost += 0.08;
+				}
+				if(bullet.current > 0){
+					bullet.current--;
+				}
+				if(bomb.current > 0){
+					bomb.current--;
+				}
+				var bulletsToRemove = [];
+				for(var i = 0; i < bullets.length; i++){
+					bullets[i].x += bullets[i].xForce;
+					bullets[i].y += bullets[i].yForce;
+					if(Math.sqrt(Math.pow((bullets[i].x - bullets[i].xStart), 2) + Math.pow((bullets[i].y - bullets[i].yStart), 2)) > bullets[i].maxDistance){
+						bulletsToRemove.push(i);
+					};
+				}
+				for(var i = 0; i < bulletsToRemove.length; i++){
+					removeBullet(bulletsToRemove[i]);
+				}
+				if(velocity != 0){
+					force.x += Math.sin(angle) * velocity;
+					force.y -= Math.cos(angle) * velocity;
+					velocity = 0;
+				}
+				position.x += force.x;
+				position.y += force.y;
+				force.x = force.x * 0.98;
+				force.y = force.y * 0.98;
+				if(Math.abs(force.x) < 0.005){ force.x = 0; }
+				if(Math.abs(force.y) < 0.005){ force.y = 0; }
+				if(position.x < map.left){
+					position.x = map.left;
+					force.x = 0 - force.x;
+				}
+				if(position.x > map.left + map.width){
+					position.x = map.left + map.width;
+					force.x = 0 - force.x;
+				}
+				if(position.y < map.top){
+					position.y = map.top;
+					force.y = 0 - force.y;
+				}
+				if(position.y > map.top + map.height){
+					position.y = map.top + map.height;
+					force.y = 0 - force.y;
+				}
+			}
+			
+			function renderMap(context){
+				context.beginPath();
+				context.strokeStyle = "#FFFFFF";
+				context.rect(Math.floor(((position.x + (map.width / 2)) / miniMap.binWidth) + miniMap.x),
+							 Math.floor(((position.y + (map.height / 2)) / miniMap.binHeight) + miniMap.y),2,2);
+				context.stroke();
+				context.closePath();
+			}
+			
+			function render(context){
+				context.save();
+				context.translate(canvasCenter.x,canvasCenter.y);
+				context.rotate(angle);
+				context.beginPath();
+				context.moveTo(0, -(height / 2) * zoom.getLevel());
+				context.lineTo((width / 2) * zoom.getLevel(), (height / 2) * zoom.getLevel());
+				context.lineTo(-(width / 2) * zoom.getLevel(), (height / 2) * zoom.getLevel());
+				context.fillStyle = "#FFFFFF";
+				context.fill();
+				context.closePath();
+				context.restore();
+				
+				context.save();
+				var x = canvasCenter.x - (position.x * zoom.getLevel());
+				var y = canvasCenter.y - (position.y * zoom.getLevel());
+				context.translate(x, y);
+				for(var i = 0; i < bullets.length; i++){
+					if(bullets[i].type == 'bullet'){
+						context.fillStyle = "#FFFFFF";
+					} else {
+						context.fillStyle = "#708090";
+					}
+					context.beginPath();
+					context.arc(bullets[i].x * zoom.getLevel(),bullets[i].y * zoom.getLevel(),bullets[i].width * zoom.getLevel(),0,2*Math.PI);
+					context.closePath();
+					context.fill();
+				}
+				context.restore();
+			}
+			
+			return { 
+				position : position,
+				width : width,
+				height: height,
+				turnLeft : turnLeft,
+				turnRight : turnRight,
+				strafeLeft : strafeLeft,
+				strafeRight : strafeRight,
+				boostShip : boostShip,
+				toggleSlowMotion : toggleSlowMotion,
+				accelerate : accelerate,
+				decelerate : decelerate,
+				shoot : shoot,
+				shootBomb : shootBomb,
+				getBulletPositions: getBulletPositions,
+				removeBullet : removeBullet,
+				getStats : getStats,
+				upgrade : upgrade,
+				takeHit : takeHit,
+				update: update,
+				renderMap : renderMap,
+				render : render
+			};
+		}
+		
+		function onScreenPartial(x, y, width, height, zoomLevel){
+			if(!zoomLevel){ zoomLevel = zoom.getLevel(); }
+			return ((x + (width / 2)) * zoomLevel >= ((mainShip.position.x * zoomLevel) - (gameWidth / 2)) &&
+				 	(x - (width / 2)) * zoomLevel <= ((mainShip.position.x * zoomLevel) + (gameWidth / 2)) && 
+				    (y + (height / 2)) * zoomLevel >= ((mainShip.position.y * zoomLevel) - (gameHeight / 2)) &&
+					(y - (height / 2)) * zoomLevel <= ((mainShip.position.y * zoomLevel) + (gameHeight / 2)));
+		}
+		
+		function onScreenFull(x, y, width, height, zoomLevel){
+			if(!zoomLevel){ zoomLevel = zoom.getLevel(); }
+			return ((x - (width / 2)) * zoomLevel >= ((mainShip.position.x * zoomLevel) - (gameWidth / 2)) &&
+				 	(x + (width / 2)) * zoomLevel <= ((mainShip.position.x * zoomLevel) + (gameWidth / 2)) && 
+				    (y - (height / 2)) * zoomLevel >= ((mainShip.position.y * zoomLevel) - (gameHeight / 2)) &&
+					(y + (height / 2)) * zoomLevel <= ((mainShip.position.y * zoomLevel) + (gameHeight / 2)));
+		}
+		
+		function collided(x1, y1, w1, h1, x2, y2, w2, h2, secondItemIsCircle){
+			if(secondItemIsCircle){
+				// http://stackoverflow.com/questions/21089959/detecting-collision-of-rectangle-with-circle
+				var radius = w2 / 2;
+				
+				var distX = Math.abs(x2 - x1 - w1/2);
+				var distY = Math.abs(y2 - y1 - h1/2);
+
+				if (distX > (w1/2 + radius)) { return false; }
+				if (distY > (h1/2 + radius)) { return false; }
+
+				if (distX <= (w1/2)) { return true; } 
+				if (distY <= (h1/2)) { return true; }
+
+				var dx=distX-w1/2;
+				var dy=distY-h1/2;
+				return (dx*dx+dy*dy<=(radius*radius));
+			} else {
+				return ((x1 - (w1 / 2)) * zoom.getLevel() < (x2 + (w2 / 2)) * zoom.getLevel() &&
+				(x1 + (w1 / 2)) * zoom.getLevel() > (x2 - (w2 / 2)) * zoom.getLevel() &&
+				(y1 - (h1 / 2)) * zoom.getLevel() < (y2 + (h2 / 2)) * zoom.getLevel() &&
+				(y1 + (h1 / 2)) * zoom.getLevel() > (y2 - (h2 / 2)) * zoom.getLevel());
+			}
+		}
+		
+		function checkGameOver(){
+			return mainShip.getStats().health <= 0;
+		}
+		
+		function run(){
+			
+			if(keys.left){
+				mainShip.turnLeft();
+			}
+			if(keys.right){
+				mainShip.turnRight();
+			}
+			if(keys.up){
+				mainShip.accelerate();
+			}
+			if(keys.down){
+				mainShip.decelerate();
+			}
+			if(keys.strafeLeft){
+				mainShip.strafeLeft();
+			}
+			if(keys.strafeRight){
+				mainShip.strafeRight();
+			}
+			if(keys.guns){
+				mainShip.shoot();
+			}
+			if(keys.bomb){
+				mainShip.shootBomb();
+			}
+			if(keys.boost){
+				mainShip.boostShip();
+			}
+			if(keys.slomo){
+				mainShip.toggleSlowMotion();
+				keys.slomo = false;
+			}
+			
+			mainShip.update();
+			mainAsteroids.update();
+			mainEnemies.update();
+			explosions.update();
+			
+			var bulletPositions = mainShip.getBulletPositions();
+			var bulletsToRemove = [];
+			for(var i = 0; i < bulletPositions.length; i++){
+				var result = mainAsteroids.checkCollisions(bulletPositions[i][0], bulletPositions[i][1], bulletPositions[i][2], bulletPositions[i][3]);
+				if(result.length > 0){
+					mainAsteroids.takeDamage(result[0], bulletPositions[i][4]);
+					bulletsToRemove.push(i);
+					sounds.playSound(bulletPositions[i][5]);
+					if(bulletPositions[i][5] == 'bullet'){
+						explosions.createExplosion(bulletPositions[i][0], bulletPositions[i][1], 1, false);
+					} else {
+						explosions.createExplosion(bulletPositions[i][0], bulletPositions[i][1], 4, false);
+					}
+				}
+				result = mainEnemies.checkCollisions(bulletPositions[i][0], bulletPositions[i][1], bulletPositions[i][2], bulletPositions[i][3]);
+				if(result.length > 0){
+					mainEnemies.takeDamage(result[0], bulletPositions[i][4]);
+					bulletsToRemove.push(i);
+					sounds.playSound(bulletPositions[i][5]);
+					if(bulletPositions[i][5] == 'bullet'){
+						explosions.createExplosion(bulletPositions[i][0], bulletPositions[i][1], 1, false);
+					} else {
+						explosions.createExplosion(bulletPositions[i][0], bulletPositions[i][1], 4, false);
+					}
+				}
+			}
+			for(var i = 0; i < bulletsToRemove.length; i++){
+				mainShip.removeBullet(bulletsToRemove[i]);
+			}
+			
+			bulletPositions = mainEnemies.getBulletPositions();
+			bulletsToRemove = [];
+			for(var i = 0; i < bulletPositions.length; i++){
+				if(collided(mainShip.position.x, mainShip.position.y, Math.max(mainShip.width,mainShip.height), Math.max(mainShip.width,mainShip.height), bulletPositions[i][0], bulletPositions[i][1], bulletPositions[i][2], bulletPositions[i][3], true)){
+					mainShip.takeHit(0, 0, bulletPositions[i][4]);
+					gameOver = checkGameOver();
+					bulletsToRemove.push([bulletPositions[i][6], bulletPositions[i][7]]);
+					sounds.playSound(bulletPositions[i][5]);
+					explosions.createExplosion(bulletPositions[i][0], bulletPositions[i][1], 1, false);
+				}
+			}
+			for(var i = 0; i < bulletsToRemove.length; i++){
+				mainEnemies.removeBullet(bulletsToRemove[i][0], bulletsToRemove[i][1]);
+			}
+			
+			var collisions = mainAsteroids.checkCollisions(mainShip.position.x, mainShip.position.y, mainShip.width, mainShip.height);
+			for(var i = 0; i < collisions.length; i++){
+				if(!mainAsteroids.isDangerous(collisions[i])){
+					sounds.playSound('gift');
+					var prize = mainAsteroids.getPrize(collisions[i]);
+					announcements.makeAnnouncement((prize.health ? '+' + prize.health + ' Health ' : '') +
+													(prize.gunRank ? '+' + prize.gunRank + ' Gun Rank ' : '') +
+													(prize.bombs ? '+' + prize.bombs + ' Bombs ' : '') +
+													(prize.boost ? '+' + prize.boost + ' Boost ' : '') +
+													(prize.boostMultiplier ? '+' + prize.boostMultiplier + ' Boost Multiplier ' : ''));
+					mainShip.upgrade(prize.health, prize.gunRank, prize.bombs, prize.boost, prize.boostMultiplier);
+				} else {
+					explosions.createExplosion(mainShip.position.x, mainShip.position.y, 2, true);
+					var asteroidForce = mainAsteroids.getForce(collisions[i]);
+					mainShip.takeHit(asteroidForce.x, asteroidForce.y, 50);
+					gameOver = checkGameOver();
+				}
+			}
+			collisions = mainEnemies.checkCollisions(mainShip.position.x, mainShip.position.y, mainShip.width, mainShip.height);
+			for(var i = 0; i < collisions.length; i++){
+				if(!mainEnemies.isDangerous(collisions[i])){
+					sounds.playSound('gift');
+					var prize = mainEnemies.getPrize(collisions[i]);
+					announcements.makeAnnouncement((prize.health ? '+' + prize.health + ' Health ' : '') +
+					(prize.gunRank ? '+' + prize.gunRank + ' Gun Rank ' : '') +
+					(prize.bombs ? '+' + prize.bombs + ' Bombs ' : '') +
+					(prize.boost ? '+' + prize.boost + ' Boost ' : '') +
+					(prize.boostMultiplier ? '+' + prize.boostMultiplier + ' Boost Multiplier ' : ''));
+					mainShip.upgrade(prize.health, prize.gunRank, prize.bombs, prize.boost, prize.boostMultiplier);
+				} else {
+					explosions.createExplosion(mainShip.position.x, mainShip.position.y, 2, true);
+					mainShip.takeHit(0, 0, 10);
+					gameOver = checkGameOver();
+				}
+			}
+			
+			if(gameOver){
+				sounds.playSound('explosion');
+			} else {
+				runTimeout = setTimeout(run, 1000 / fps.clock);
+			}
+
+		}
+		
+		function render(){
+			mainContext.beginPath();
+			mainContext.rect(0, 0, gameWidth, gameHeight);
+			mainContext.fillStyle = "#000000";
+			mainContext.fill();
+			mainContext.closePath();
+			
+			mainShip.render(mainContext);
+			mainStars.render(mainContext);
+			var itemsOnScreen = [];
+			itemsOnScreen = itemsOnScreen.concat(mainAsteroids.render(mainContext));
+			itemsOnScreen = itemsOnScreen.concat(mainEnemies.render(mainContext));
+			zoom.autoZoom(itemsOnScreen);
+			
+			explosions.render(mainContext);
+			
+			mainContext.beginPath();
+			mainContext.rect(miniMap.x,miniMap.y,miniMap.width,miniMap.height);
+			mainContext.fillStyle = "#000000";
+			mainContext.fill();
+			mainContext.closePath();
+			mainContext.beginPath();
+			mainContext.strokeStyle = "#FFFFFF";
+			mainContext.rect(miniMap.x,miniMap.y,miniMap.width,miniMap.height);
+			mainContext.stroke();
+			mainContext.closePath();
+			
+			mainShip.renderMap(mainContext);
+			mainAsteroids.renderMap(mainContext);
+			mainEnemies.renderMap(mainContext);
+			
+			var stats = mainShip.getStats();
+			mainContext.fillStyle = '#FFFFFF';
+			mainContext.font = '15px Arial';
+			mainContext.fillText('Health: ' + stats.health, 30, 30);
+			mainContext.fillText('Focus: ' + stats.slomo, 30, 50);
+			mainContext.fillText('Gun Rank: ' + stats.gunRank, 30, 70);
+			mainContext.fillText('Bombs: ' + stats.bombs, 30, 90);
+			mainContext.fillText('Boost: ' + stats.boost, 30, 110);
+			mainContext.fillText('Boost Multiplier: ' + stats.boostMultiplier, 30, 130);
+			mainContext.fillText('Score: ' + theSpaceMess.score, (gameWidth / 2) - 80, 30);
+			
+			var announcement = announcements.getAnnouncement();
+			if(announcement ){
+				mainContext.globalAlpha= announcement.current / announcement.duration;
+				mainContext.font = '10px Arial';
+				mainContext.fillText(announcement.text, (gameWidth / 2) - (announcement.text.length * 2), (gameHeight / 2) - 15);
+				mainContext.globalAlpha=1;
+			}
+			
+			if(theSpaceMess.debug){
+				var tmpfps = 1000 / ((fps.current = new Date) - fps.last);
+				if (fps.current != fps.last){
+					fps.measured += (tmpfps - fps.measured) / fps.filter;
+					fps.last = fps.current;
+				}
+				mainContext.fillStyle = '#FFFFFF';
+				mainContext.font = '14px Arial';
+				mainContext.fillText('FPS : ' + Math.round(fps.measured), gameWidth - 90, 30);
+			}
+			
+			if(gameOver){
+				mainContext.beginPath();
+				mainContext.rect(0, 0, gameWidth, gameHeight);
+				mainContext.fillStyle = "#000000";
+				mainContext.fill();
+				mainContext.closePath();
+				mainContext.fillStyle = '#FFFFFF';
+				mainContext.font = '20px Arial';
+				mainContext.fillText('YOU LOSE. GOOD DAY SIR.', (gameWidth / 2) - 140, (gameHeight / 2) - 40);
+				mainContext.fillText('Final Score: ' + theSpaceMess.score, (gameWidth / 2) - 75, (gameHeight / 2) - 10);
+			} else {
+				//renderTimeout = requestAnimationFrame(render);
+				renderTimeout = setTimeout(render, 1000 / fps.max);
+			}
+		}
+		
+		stop = function(){
+			clearTimeout(runTimeout);
+			//cancelAnimationFrame(renderTimeout);
+			clearTimeout(renderTimeout);
+			runTimeout = renderTimeout = null;
+			
+			mainContext.save();
+			
+			mainContext.globalAlpha=0.4;
+			mainContext.beginPath();
+			mainContext.rect(0, 0, gameWidth, gameHeight);
+			mainContext.fillStyle = "#000000";
+			mainContext.fill();
+			mainContext.closePath();
+			mainContext.globalAlpha=1;
+			
+			var width = 500;
+			var height = 500;
+			var left = (gameWidth / 2) - (width / 2);
+			var top = gameHeight / 4;
+			
+			mainContext.beginPath();
+			mainContext.rect(left, top, width, height);
+			mainContext.fillStyle = "#000000";
+			mainContext.fill();
+			mainContext.closePath();
+			mainContext.beginPath();
+			mainContext.rect(left, top, width, height);
+			mainContext.strokeStyle = "#FFFFFF";
+			mainContext.stroke();
+			mainContext.closePath();
+			
+			
+			mainContext.fillStyle = '#FFFFFF';
+			mainContext.font = '20px Arial';
+			mainContext.fillText('space mess v' + theSpaceMess.version, left + (width / 2) - 77, top + 30);
+			mainContext.fillText('controls:', left + 10, top + 70);
+			mainContext.fillText('move - arrows', left + 10, top + 100);
+			mainContext.fillText('strafe - a / d', left + 10, top + 130);
+			mainContext.fillText('shoot - w', left + 10, top + 160);
+			mainContext.fillText('missiles - s', left + 10, top + 190);
+			mainContext.fillText('boost - space', left + 10, top + 220);
+			mainContext.fillText('focus - shift', left + 10, top + 250);
+			mainContext.fillText('esc - pause', left + 10, top + 280);
+			mainContext.fillText('stop / start music - 9', left + 10, top + 310);
+			mainContext.fillText('press esc to begin', left + (width / 2) - 80, top + 400);
+			mainContext.restore();
+		}
+		
+		theSpaceMess.resize = function(){
+			gameWidth = (window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth) - 3;
+			gameHeight = (window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight) - 3;
+			
+			canvasCenter = {
+				x : Math.floor(gameWidth / 2),
+				y : Math.floor(gameHeight / 2)
+			};
+			
+			canvas.width = gameWidth;
+			canvas.height = gameHeight;
+			
+			miniMap.width = Math.floor(gameWidth / 5);
+			miniMap.height = Math.floor(gameHeight / 5);
+			miniMap.x = gameWidth - miniMap.width - 1;
+			miniMap.y = gameHeight - miniMap.height - 1;
+			miniMap.binWidth =  Math.floor(map.width / miniMap.width);
+			miniMap.binHeight =  Math.floor(map.height / miniMap.height);
+		}
+		
+		function start(){
+			theSpaceMess.resize();
+			document.title = 'space mess v' + theSpaceMess.version;
+			
+			document.body.appendChild(canvas);
+			
+			mainShip = ship();
+			mainStars = stars();
+			mainAsteroids = asteroids();
+			mainEnemies = enemies();
+			
+			document.addEventListener("keydown",function (e) {
+			    switch (e.charCode || e.keyCode){
+			        case 37: keys.left = true; break;
+			        case 39: keys.right = true; break;
+			        case 38: keys.up = true; break;
+			        case 40: keys.down = true; break;
+					case 65: keys.strafeLeft = true; break;
+					case 68: keys.strafeRight = true; break;
+					case 87: keys.guns = true; break;
+					case 83: keys.bomb = true; break;
+					case 32: keys.boost = true; break;
+					case 192: theSpaceMess.debug = !theSpaceMess.debug; break;
+					case 27: if(runTimeout){ stop(); } else { run(); render(); } break;
+					case 57: sounds.toggleBackground(); break;
+			      }
+			});
+			document.addEventListener("keyup",function (e) {
+			    switch (e.charCode || e.keyCode){
+			        case 37: keys.left = false; break;
+			        case 39: keys.right = false; break;
+			        case 38: keys.up = false; break;
+			        case 40: keys.down = false; break;
+					case 65: keys.strafeLeft = false; break;
+					case 68: keys.strafeRight = false; break;
+					case 87: keys.guns = false; break;
+					case 83: keys.bomb = false; break;
+					case 32: keys.boost = false; break;
+					case 16: keys.slomo = true; break;
+			      }
+			});
+			
+			run();
+			requestAnimationFrame(render);
+		}
+		
+		start();
+		
+		if(!developmentMode){
+			setTimeout(stop, 100);
+		}
+		
+		return theSpaceMess;
+	}
+	
+	var spaceMessGame = spaceMess();
+	
+	window.onresize = function(event) {
+	    spaceMessGame.resize();
+	};
+	
+	</script>
+</body>
+</html>
